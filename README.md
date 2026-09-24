@@ -1,6 +1,6 @@
 # AI PCB Engineering Reviewer — Gemini
 
-Updated for Gemini 3.6 Flash.
+Updated for Gemini 3.8 Flash. amd Fallback support to later gemini models
 
 ## Streamlit Cloud deployment
 Upload these files to the repository root and rename them exactly to:
