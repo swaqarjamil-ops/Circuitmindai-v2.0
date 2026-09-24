@@ -1,20 +1,17 @@
 """
 CircuitMind AI - PCB/Schematic Engineering Reviewer
 
-Streamlit application for reviewing schematic PDFs with Groq-hosted models.
+Streamlit application for reviewing schematic PDFs with Google Gemini.
 
-Primary model:
-- openai/gpt-oss-120b on Groq
-
-Fallback models:
-- openai/gpt-oss-20b
-- qwen/qwen3.8-27b
-
-Important:
-GPT-OSS 120B is a text-only model on Groq. The application therefore
-extracts the schematic PDF's text/vector labels and sends that engineering
-content to GPT-OSS. Qwen 3.8 27B is retained as an optional multimodal
-fallback for visual page inspection when needed.
+Key features:
+- PDF pages rendered as high-resolution images
+- Multimodal Gemini schematic analysis
+- Automatic retry for temporary Gemini errors
+- Exponential backoff with jitter
+- Automatic model fallback
+- Streamlit-friendly error handling
+- Markdown report tabs
+- PDF and Word report downloads
 """
 
 import io
@@ -26,7 +23,8 @@ from xml.sax.saxutils import escape
 
 import fitz
 import streamlit as st
-from groq import Groq
+from google import genai
+from google.genai import types
 from PIL import Image
 
 
@@ -34,22 +32,19 @@ from PIL import Image
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "openai/gpt-oss-120b"
+DEFAULT_MODEL = "gemini-3.8-flash"
 
-# Primary Groq model followed by fallback models.
+# Primary model followed by fallback models.
 MODEL_OPTIONS = [
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "qwen/qwen3.8-27b",
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
 ]
-
-GROQ_API_KEY_NAME = "GROQ_API_KEY"
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 MAX_MODEL_RETRIES = 3
 INITIAL_RETRY_DELAY = 2.0
 RETRY_JITTER_MAX = 1.0
-MAX_OUTPUT_TOKENS = 12000
 
 REPORT_SECTIONS = [
     "Executive Summary",
@@ -61,7 +56,7 @@ REPORT_SECTIONS = [
 
 
 # ---------------------------------------------------------------------------
-# PDF -> Image/Text helpers
+# PDF -> Image helpers
 # ---------------------------------------------------------------------------
 
 def render_pdf_pages_to_images(
@@ -76,45 +71,17 @@ def render_pdf_pages_to_images(
         for page in doc:
             pixmap = page.get_pixmap(matrix=matrix, alpha=False)
             img_bytes = pixmap.tobytes("png")
-            images.append(
-                Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            )
+            images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
 
     return images
-
-
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    """
-    Extract selectable text, reference designators, net names, labels and
-    component values from the schematic PDF.
-    """
-    page_text = []
-
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        for page_number, page in enumerate(doc, start=1):
-            text = page.get_text("text") or ""
-            text = re.sub(r"[ \t]+", " ", text)
-            text = re.sub(r"\n{3,}", "\n\n", text)
-            page_text.append(
-                f"\n===== SCHEMATIC PAGE {page_number} =====\n{text.strip()}"
-            )
-
-    combined = "\n".join(page_text).strip()
-
-    # Keep prompts manageable while retaining a large amount of engineering
-    # information. GPT-OSS 120B supports a 131K context window on Groq.
-    return combined[:500_000]
 
 
 # ---------------------------------------------------------------------------
 # Prompt building
 # ---------------------------------------------------------------------------
 
-def build_review_prompt(
-    extra_notes: str,
-    extracted_text: str,
-) -> str:
-    """Build the engineering-review prompt sent to Groq."""
+def build_review_prompt(extra_notes: str) -> str:
+    """Build the engineering-review prompt sent to Gemini."""
 
     notes_block = (
         f"\nAdditional design context from the user:\n{extra_notes}\n"
@@ -122,31 +89,18 @@ def build_review_prompt(
         else ""
     )
 
-    text_block = extracted_text or (
-        "No selectable PDF text was extracted. Treat component/net details "
-        "as unconfirmed and explicitly state that visual inspection is limited."
-    )
-
     return f"""
 You are a senior PCB hardware design engineer performing a rigorous schematic
-review. Analyze the supplied schematic-derived engineering text carefully.
-Use exact reference designators, net names, connector names, IC names and
-component values whenever they are present. Do not invent details that are
-not supported by the supplied data.
+review. You are shown one or more schematic pages (as images) from a single
+PCB design. Study every net, component value, reference designator, and
+connector you can identify.
 {notes_block}
-
-The source PDF text is provided below. It may contain OCR/vector extraction
-artifacts, repeated labels, or incomplete visual information.
-
-{text_block}
-
 Produce a deep-dive engineering report in MARKDOWN using EXACTLY these five
 '##' headings, in this order, and nothing else before or after them:
 
 ## Executive Summary
 A short (4-6 sentence) plain-language overview of the design's overall
-health and the single biggest risk found. Clearly distinguish confirmed
-findings from items requiring PCB layout verification.
+health and the single biggest risk found.
 
 ## Signal Integrity Analysis
 Identify and explain concerns such as: high-speed / clock / differential
@@ -154,184 +108,212 @@ pairs lacking series or termination resistors, impedance-sensitive nets
 without a clear reference plane, long unbuffered traces implied by the
 schematic, missing decoupling near high-speed ICs, fan-out or routing
 choices visible in the schematic that risk reflections or crosstalk,
-and single-ended interfaces that should be reviewed for differential
-implementation.
+and any single-ended signals that should likely be differential.
 
 ## Power and Ground Loop Analysis
-Identify and explain concerns such as: decoupling capacitor values and
-placement requirements versus IC power pins, missing bulk/bypass
-capacitance, star-grounding vs multi-point grounding conflicts, ground
-return path risks for high-current or high-speed loops, split/isolated
-ground schemes and their stitching, power sequencing risks, and large
-physical loop areas implied by power and return topology.
+Identify and explain concerns such as: decoupling capacitor placement and
+values versus IC power pins, missing bulk/bypass capacitance, star-grounding
+vs multi-point grounding conflicts, ground return path length for
+high-current or high-speed loops, split/isolated ground schemes and their
+stitching, power sequencing risks, and any large physical loop areas
+implied by how power and return nets are drawn.
 
 ## Common Mode Coupling Analysis
 Identify and explain concerns such as: cable/connector shield grounding,
-common-mode choke usage or absence on I/O and power lines, isolation
-barrier crossings, unbalanced differential interfaces, conversion of
-differential noise to common-mode noise, and noisy switching nets near
-sensitive analog or shield references.
+common-mode choke usage (or absence) on I/O and power lines, isolation
+barrier crossings, unbalanced differential routing that could convert
+differential noise to common-mode, and proximity of noisy switching nets
+to sensitive analog or shield references.
 
 ## Prioritized Recommendations
-A numbered list (highest engineering impact first) of concrete,
-actionable fixes. For each item state: the issue, the risk if unresolved,
-and the specific schematic-level fix. Mark any recommendation that must be
-verified against the PCB layout, stack-up, impedance rules, or EMC test data.
+A numbered list (highest impact first) of concrete, actionable fixes. For
+each item state: the issue, the risk if unresolved, and the specific
+schematic-level fix (e.g. component to add, net to reroute, value to
+change).
 
 Formatting rules:
 - Reference specific component designators, net names, or page numbers
-  whenever the extracted data supports them.
-- Never silently guess a component value, topology, trace length, stack-up,
-  impedance, or layout relationship.
-- Explicitly say when a conclusion cannot be confirmed from schematic data.
-- Be direct and technical; this report is for a hardware engineer.
+  whenever you can see them in the image.
+- If a page's image quality or resolution prevents you from confirming a
+  detail, say so explicitly rather than guessing silently.
+- Be direct and technical; this report is for a hardware engineer, not a
+  general audience.
 """.strip()
 
 
+def build_gemini_contents(
+    images: list[Image.Image],
+    extra_notes: str,
+) -> list:
+    """Build Gemini multimodal contents from schematic page images."""
+
+    contents = []
+
+    for img in images:
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+
+        contents.append(
+            types.Part.from_bytes(
+                data=buffer.getvalue(),
+                mime_type="image/png",
+            )
+        )
+
+    contents.append(build_review_prompt(extra_notes))
+
+    return contents
+
+
 # ---------------------------------------------------------------------------
-# Groq error handling
+# Gemini error handling
 # ---------------------------------------------------------------------------
 
-def is_temporary_groq_error(exc: Exception) -> bool:
-    """Return True for transient Groq/API conditions worth retrying."""
+def is_temporary_gemini_error(exc: Exception) -> bool:
+    """
+    Determine whether a Gemini exception is likely temporary.
+
+    Retries common transient HTTP/API conditions:
+    408, 429, 500, 502, 503, 504 and common Gemini status messages.
+    """
 
     error_text = str(exc).upper()
 
     temporary_markers = [
         "408",
-        "409",
-        "425",
         "429",
         "500",
         "502",
         "503",
         "504",
-        "TIMEOUT",
-        "TIMED OUT",
-        "RATE LIMIT",
-        "RATE_LIMIT",
-        "TOO MANY REQUESTS",
-        "SERVICE UNAVAILABLE",
-        "INTERNAL SERVER ERROR",
-        "OVERLOADED",
+        "UNAVAILABLE",
+        "RESOURCE_EXHAUSTED",
+        "INTERNAL",
+        "DEADLINE_EXCEEDED",
+        "SERVICE_UNAVAILABLE",
         "TEMPORARILY UNAVAILABLE",
-        "CONNECTION RESET",
+        "HIGH DEMAND",
+        "OVERLOADED",
     ]
 
     return any(marker in error_text for marker in temporary_markers)
 
 
-def get_groq_error_message(exc: Exception) -> str:
-    """Convert a raw Groq exception into a concise Streamlit message."""
+def get_gemini_error_message(exc: Exception) -> str:
+    """Convert a raw Gemini exception into a concise user-facing message."""
 
     error_text = str(exc)
     upper_error = error_text.upper()
 
-    if "429" in upper_error or "RATE LIMIT" in upper_error:
-        return "Groq rate limit was reached."
+    if "503" in upper_error or "UNAVAILABLE" in upper_error:
+        return "Gemini is temporarily overloaded or unavailable."
 
-    if "401" in upper_error:
-        return "Groq API authentication failed. Check GROQ_API_KEY."
+    if "429" in upper_error or "RESOURCE_EXHAUSTED" in upper_error:
+        return "Gemini rate or quota limit was reached."
 
-    if "403" in upper_error:
-        return "Groq API access was denied for this key or model."
-
-    if "404" in upper_error:
-        return "The requested Groq model was not found or is unavailable to this API key."
-
-    if any(code in upper_error for code in ("408", "500", "502", "503", "504")):
-        return "Groq is temporarily unavailable or the request timed out."
+    if "401" in upper_error or "403" in upper_error:
+        return "Gemini API authentication or permission failed."
 
     if "400" in upper_error:
-        return "Groq rejected the request. Check model support and request parameters."
+        return "Gemini rejected the request. Check the request parameters."
 
-    return "Groq returned an unexpected API error."
+    if "404" in upper_error:
+        return (
+            "The requested Gemini model was not found or is not available "
+            "to this API key."
+        )
+
+    if "504" in upper_error or "DEADLINE_EXCEEDED" in upper_error:
+        return "Gemini took too long to respond."
+
+    return "Gemini returned an unexpected API error."
 
 
 # ---------------------------------------------------------------------------
-# Groq API call with retry + fallback
+# Gemini API call with retry + fallback
 # ---------------------------------------------------------------------------
 
-def call_groq(
+def call_gemini(
     api_key: str,
     model: str,
-    prompt: str,
+    contents: list,
 ) -> str:
     """
-    Send the PCB engineering review request to Groq.
+    Send the multimodal PCB review request to Gemini.
 
-    The requested model is attempted first. Temporary failures are retried
-    with exponential backoff and jitter. If a model remains unavailable,
-    the next configured fallback model is tried automatically.
+    Behavior:
+    1. Try the requested primary model.
+    2. Retry temporary failures up to MAX_MODEL_RETRIES.
+    3. Use exponential backoff with jitter.
+    4. Move automatically to the next fallback model.
+    5. Stop immediately for permanent API errors.
     """
 
     if not api_key:
         raise RuntimeError(
-            "Groq API key is missing. Add GROQ_API_KEY to Streamlit Secrets."
+            "Gemini API key is missing. Add GEMINI_API_KEY to "
+            "Streamlit Secrets."
         )
 
+    # Requested model first, then remaining configured fallbacks.
     models_to_try = [model]
+
     for fallback_model in MODEL_OPTIONS:
         if fallback_model not in models_to_try:
             models_to_try.append(fallback_model)
 
-    client = Groq(
-        api_key=api_key,
-        base_url=GROQ_BASE_URL,
-    )
-
+    client = genai.Client(api_key=api_key)
     last_error = None
     total_models = len(models_to_try)
 
     for model_index, current_model in enumerate(models_to_try):
 
         if model_index == 0:
-            st.write(f"Primary Groq model: `{current_model}`")
+            st.write(f"Primary Gemini model: `{current_model}`")
         else:
             st.warning(
-                f"Switching to fallback model `{current_model}` "
-                f"({model_index + 1}/{total_models})."
+                f"Switching to fallback model "
+                f"`{current_model}` ({model_index + 1}/{total_models})."
             )
 
         for attempt in range(1, MAX_MODEL_RETRIES + 1):
+
             try:
                 if attempt == 1:
                     st.write(f"AI analysis using `{current_model}`...")
                 else:
                     st.write(
-                        f"Retry {attempt}/{MAX_MODEL_RETRIES} using "
-                        f"`{current_model}`..."
+                        f"Retry {attempt}/{MAX_MODEL_RETRIES} "
+                        f"using `{current_model}`..."
                     )
 
-                response = client.chat.completions.create(
+                response = client.models.generate_content(
                     model=current_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an expert PCB hardware and signal-integrity "
-                                "engineer with 20+ years of engineering review "
-                                "experience. Give precise, actionable and technically "
-                                "grounded feedback. Never invent schematic details."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        },
-                    ],
-                    reasoning_effort="medium",
-                    max_completion_tokens=MAX_OUTPUT_TOKENS,
-                    temperature=1.0,
-                    stream=False,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=(
+                            "You are an expert PCB and signal-integrity "
+                            "engineer with 20+ years of hardware review "
+                            "experience. Give precise, actionable, "
+                            "technically grounded feedback. Analyze only "
+                            "what can reasonably be established from the "
+                            "supplied schematic images and clearly mark "
+                            "uncertainty."
+                        ),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level="medium"
+                        ),
+                        max_output_tokens=6000,
+                    ),
                 )
 
-                if response is None or not response.choices:
-                    raise RuntimeError("Groq returned no response choices.")
+                if response is None:
+                    raise RuntimeError("Gemini returned no response.")
 
-                text = response.choices[0].message.content
-                if not text or not text.strip():
-                    raise RuntimeError("Groq returned an empty response.")
+                if not response.text:
+                    raise RuntimeError(
+                        "Gemini returned an empty response."
+                    )
 
                 if model_index == 0:
                     st.success(
@@ -339,31 +321,40 @@ def call_groq(
                     )
                 else:
                     st.success(
-                        f"Analysis completed using fallback model `{current_model}`."
+                        f"Analysis completed using fallback model "
+                        f"`{current_model}`."
                     )
 
-                return text.strip()
+                return response.text
 
             except Exception as exc:
                 last_error = exc
 
-                if not is_temporary_groq_error(exc):
-                    friendly_message = get_groq_error_message(exc)
+                # Do not retry permanent errors.
+                if not is_temporary_gemini_error(exc):
+                    friendly_message = get_gemini_error_message(exc)
+
                     raise RuntimeError(
-                        f"{friendly_message}\n\nTechnical details: {exc}"
+                        f"{friendly_message}\n\n"
+                        f"Technical details: {exc}"
                     ) from exc
 
+                # Temporary error: retry this model if attempts remain.
                 if attempt < MAX_MODEL_RETRIES:
-                    delay = INITIAL_RETRY_DELAY * (2 ** (attempt - 1))
+
+                    delay = INITIAL_RETRY_DELAY ** attempt
                     jitter = random.uniform(0, RETRY_JITTER_MAX)
                     wait_time = delay + jitter
 
                     st.warning(
                         f"⚠️ `{current_model}` is temporarily unavailable. "
-                        f"{get_groq_error_message(exc)} "
-                        f"Retrying in approximately {wait_time:.1f} seconds..."
+                        f"{get_gemini_error_message(exc)} "
+                        f"Retrying in approximately "
+                        f"{wait_time:.1f} seconds..."
                     )
+
                     time.sleep(wait_time)
+
                 else:
                     st.warning(
                         f"⚠️ `{current_model}` failed after "
@@ -371,100 +362,19 @@ def call_groq(
                     )
 
         if model_index < total_models - 1:
-            st.info("Trying the next configured Groq model...")
+            st.info("Trying the next configured Gemini model...")
 
+    # All models failed.
     if last_error:
         raise RuntimeError(
-            "All configured Groq models were temporarily unavailable.\n\n"
-            f"{get_groq_error_message(last_error)}\n\n"
+            "All configured Gemini models are temporarily unavailable.\n\n"
+            f"{get_gemini_error_message(last_error)}\n\n"
             "Please wait a few minutes and try the PCB analysis again."
         ) from last_error
 
-    raise RuntimeError("Groq analysis could not be completed.")
+    raise RuntimeError("Gemini analysis could not be completed.")
 
 
-# ---------------------------------------------------------------------------
-# Optional visual fallback using Groq Qwen 3.8
-# ---------------------------------------------------------------------------
-
-def analyze_visual_pages_with_qwen(
-    api_key: str,
-    images: list[Image.Image],
-    extra_notes: str,
-) -> str:
-    """
-    Optional visual inspection pass using Groq's qwen/qwen3.8-27b model.
-
-    Qwen 3.8 27B supports image input on Groq. At most three pages are sent
-    per request, matching the current Groq vision limit.
-    """
-
-    if not api_key or not images:
-        return ""
-
-    client = Groq(api_key=api_key, base_url=GROQ_BASE_URL)
-    observations = []
-
-    visual_prompt = f"""
-You are a PCB schematic visual-inspection assistant. Inspect these schematic
-page images and report only visually supported observations useful to a
-hardware engineer reviewing signal integrity, power/ground topology, EMI,
-and common-mode coupling.
-
-For each visible issue, include page number, reference designator/net name
-when readable, observed topology, and why it may matter. Do not invent
-values or connections. State clearly when a detail is unreadable.
-{('Additional design context: ' + extra_notes) if extra_notes else ''}
-""".strip()
-
-    # Groq currently limits Qwen 3.8 to three images per request.
-    for start in range(0, len(images), 3):
-        batch = images[start:start + 3]
-        content = [{"type": "text", "text": visual_prompt}]
-
-        for offset, image in enumerate(batch):
-            buffer = io.BytesIO()
-            image.save(buffer, format="JPEG", quality=85)
-            import base64
-            encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            page_number = start + offset + 1
-
-            content.append(
-                {
-                    "type": "text",
-                    "text": f"SCHEMATIC PAGE {page_number}",
-                }
-            )
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{encoded}"
-                    },
-                }
-            )
-
-        response = client.chat.completions.create(
-            model="qwen/qwen3.8-27b",
-            messages=[{"role": "user", "content": content}],
-            reasoning_effort="medium",
-            max_completion_tokens=5000,
-            temperature=1.0,
-            stream=False,
-        )
-
-        if response.choices and response.choices[0].message.content:
-            observations.append(
-                f"\n===== VISUAL REVIEW BATCH {start // 3 + 1} =====\n"
-                + response.choices[0].message.content.strip()
-            )
-
-    return "\n".join(observations).strip()
-
-
-# ---------------------------------------------------------------------------
-# Report parsing
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Report parsing
 # ---------------------------------------------------------------------------
@@ -1132,7 +1042,7 @@ def main():
     configure_page()
 
     settings = {
-        "api_key": st.secrets.get(GROQ_API_KEY_NAME, None),
+        "api_key": st.secrets.get("GEMINI_API_KEY", None),
         "model": DEFAULT_MODEL,
         "zoom": 2.0,
     }
@@ -1377,7 +1287,7 @@ def main():
                 )
 
         # ---------------------------------------------------------------
-        # Groq analysis
+        # Gemini analysis
         # ---------------------------------------------------------------
 
         status = None
@@ -1394,38 +1304,15 @@ def main():
                     "and EMI & coupling."
                 )
 
-                extracted_text = extract_pdf_text(pdf_bytes)
-                st.write(
-                    f"✓ Extracted {len(extracted_text):,} characters of schematic text/labels."
-                )
-
-                visual_notes = ""
-                try:
-                    st.write("Performing visual schematic cross-check with Qwen 3.8...")
-                    visual_notes = analyze_visual_pages_with_qwen(
-                        settings["api_key"],
-                        images,
-                        extra_notes,
-                    )
-                    if visual_notes:
-                        st.success("Visual schematic cross-check completed.")
-                except Exception as visual_exc:
-                    st.warning(
-                        "Visual cross-check was skipped; continuing with GPT-OSS text analysis. "
-                        f"Reason: {get_groq_error_message(visual_exc)}"
-                    )
-
-                prompt = build_review_prompt(
+                contents = build_gemini_contents(
+                    images,
                     extra_notes,
-                    extracted_text + (
-                        "\n\n" + visual_notes if visual_notes else ""
-                    ),
                 )
 
-                report_text = call_groq(
+                report_text = call_gemini(
                     settings["api_key"],
                     settings["model"],
-                    prompt,
+                    contents,
                 )
 
                 status.update(
@@ -1448,7 +1335,7 @@ def main():
             )
 
             st.info(
-                "The application automatically retries temporary Groq "
+                "The application automatically retries temporary Gemini "
                 "errors and switches to fallback models when possible. "
                 "If all models are busy, wait a few minutes and try again."
             )
