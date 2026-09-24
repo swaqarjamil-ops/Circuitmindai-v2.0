@@ -40,9 +40,9 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 # Gemini model configuration.
-DEFAULT_MODEL = "gemini-3.6-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 MODEL_OPTIONS = [
-    "gemini-3.6-flash",
+    "gemini-3.8-flash",
 ]
 
 # Section headers we ask the model to use, so we can split the report
