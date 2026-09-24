@@ -1,4 +1,6 @@
-streamlit>=1.40.0
-pymupdf>=1.24.0
-pillow>=10.0.0
-google-genai>=1.0.0
+groq
+streamlit
+PyMuPDF
+Pillow
+reportlab
+python-docx
