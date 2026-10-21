@@ -1378,7 +1378,7 @@ def main():
             """
             <div class="report-shell">
                 <div class="report-title">
-                    PCB/Schematic Review Report
+                       CircuitMind2.0 Review Report
                 </div>
                 <div class="report-subtitle">
                     AI-ASSISTED • PRIORITIZED ENGINEERING FINDINGS
