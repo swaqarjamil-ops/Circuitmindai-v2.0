@@ -902,7 +902,7 @@ def make_pdf(
 
     story = [
         Paragraph(
-            "PCB/Schematic Reviewer — Engineering Report",
+            "CircuitMind:2.0 — Engineering Report",
             title,
         ),
         Paragraph(
