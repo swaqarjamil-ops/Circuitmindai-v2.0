@@ -21,7 +21,7 @@ import time
 from io import BytesIO
 from xml.sax.saxutils import escape
 
-import fitz
+import pymupdf
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -52,6 +52,7 @@ REPORT_SECTIONS = [
     "Power and Ground Loop Analysis",
     "Common Mode Coupling Analysis",
     "Prioritized Recommendations",
+    "References",
 ]
 
 
@@ -65,9 +66,9 @@ def render_pdf_pages_to_images(
 ) -> list[Image.Image]:
     """Convert every PDF page into a PIL image."""
     images = []
-    matrix = fitz.Matrix(zoom, zoom)
+    matrix = pymupdf.Matrix(zoom, zoom)
 
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
             pixmap = page.get_pixmap(matrix=matrix, alpha=False)
             img_bytes = pixmap.tobytes("png")
@@ -95,7 +96,7 @@ review. You are shown one or more schematic pages (as images) from a single
 PCB design. Study every net, component value, reference designator, and
 connector you can identify.
 {notes_block}
-Produce a deep-dive engineering report in MARKDOWN using EXACTLY these five
+Produce a deep-dive engineering report in MARKDOWN using EXACTLY these six
 '##' headings, in this order, and nothing else before or after them:
 
 ## Executive Summary
@@ -130,6 +131,26 @@ A numbered list (highest impact first) of concrete, actionable fixes. For
 each item state: the issue, the risk if unresolved, and the specific
 schematic-level fix (e.g. component to add, net to reroute, value to
 change).
+
+## References
+A numbered list of every source cited in the report above. Each entry gives
+the standard, book, application note, or datasheet name, the author or
+publisher, and what it supports in this review.
+
+Reference rules:
+- Every bullet point and every numbered recommendation in the Signal
+  Integrity, Power and Ground Loop, Common Mode Coupling, and Prioritized
+  Recommendations sections MUST end with a line of the form
+  "Relevant reference: [n]", where [n] is the number of the matching entry
+  in the References section. Several numbers are allowed, e.g. [1], [3].
+- Cite only well-known sources you are confident exist (for example
+  IPC-2221B, IPC-2141A, CISPR 32, IEC 61000-4-2, Ott "Electromagnetic
+  Compatibility Engineering", Johnson & Graham "High-Speed Digital Design",
+  Bogatin "Signal and Power Integrity - Simplified", or the relevant IC
+  datasheet). Never invent URLs, document numbers, or section/page numbers.
+- If no solid source applies to a point, write
+  "Relevant reference: general engineering practice" and do not add a
+  numbered entry for it.
 
 Formatting rules:
 - Reference specific component designators, net names, or page numbers
@@ -303,7 +324,7 @@ def call_gemini(
                         thinking_config=types.ThinkingConfig(
                             thinking_level="medium"
                         ),
-                        max_output_tokens=6000,
+                        max_output_tokens=8000,
                     ),
                 )
 
@@ -1195,7 +1216,7 @@ def main():
         run_clicked = st.button(
             "⚡ Analyze My PCB/Schematic",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     else:
@@ -1283,7 +1304,7 @@ def main():
                 cols[i % len(cols)].image(
                     img,
                     caption=f"Page {i + 1}",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
         # ---------------------------------------------------------------
@@ -1469,7 +1490,7 @@ def main():
                 data=report_pdf,
                 file_name="pcb_schematic_review.pdf",
                 mime="application/pdf",
-                use_container_width=True,
+                width="stretch",
             )
 
         with d2:
@@ -1482,7 +1503,7 @@ def main():
                     "application/vnd.openxmlformats-officedocument."
                     "wordprocessingml.document"
                 ),
-                use_container_width=True,
+                width="stretch",
             )
 
 
