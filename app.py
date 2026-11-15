@@ -865,7 +865,7 @@ def render_metric(number: str, label: str):
 
 def make_pdf(
     report_text: str,
-    filename: str = "pcb_schematic_review.pdf",
+    filename: str = "Circuitmindv2_review.pdf",
 ) -> bytes:
     """Generate a PDF engineering report."""
 
@@ -979,7 +979,7 @@ def make_docx(report_text: str) -> bytes:
     doc = Document()
 
     doc.add_heading(
-        "PCB/Schematic Reviewer — Engineering Report",
+        "CircuitMind:2.0 — Engineering Report",
         level=0,
     )
 
@@ -1263,7 +1263,7 @@ def main():
                 )
 
                 status.update(
-                    label="Schematic ready",
+                    label="Design preview ready",
                     state="complete",
                     expanded=False,
                 )
@@ -1271,13 +1271,13 @@ def main():
             except Exception as exc:
 
                 status.update(
-                    label="Schematic preparation failed",
+                    label="Preview preparation failed",
                     state="error",
                     expanded=True,
                 )
 
                 st.error(
-                    "⚠️ Could not prepare the schematic PDF."
+                    "⚠️ Could not prepare the preview of PDF."
                 )
 
                 with st.expander("Technical details"):
@@ -1290,7 +1290,7 @@ def main():
         # ---------------------------------------------------------------
 
         with st.expander(
-            f"👁 Preview submitted schematic • "
+            f"👁 Preview submitted PDF • "
             f"{len(images)} page(s)",
             expanded=False,
         ):
@@ -1316,7 +1316,7 @@ def main():
         try:
 
             with st.status(
-                "🤖 Analyzing your PCB/schematic…",
+                "🤖 Analyzing your Circuit…",
                 expanded=True,
             ) as status:
 
