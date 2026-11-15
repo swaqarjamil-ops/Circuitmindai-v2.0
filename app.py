@@ -37,9 +37,9 @@ DEFAULT_MODEL = "gemini-4-hydrogen"
 # Primary model followed by fallback models.
 MODEL_OPTIONS = [
     "gemini-4-hydrogen",
-    "gemini-4-argon",
-    "gemini-4-carbon",
     "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite"
 ]
 
 MAX_MODEL_RETRIES = 3
