@@ -1094,12 +1094,12 @@ def main():
         <div class="workflow">
             <div class="step">
                 <span class="step-num">1</span>
-                <b>Add schematic</b>
+                <b>Add PCB/Schematic</b>
                 <small>Upload your PDF and optionally add design context.</small>
             </div>
             <div class="step">
                 <span class="step-num">2</span>
-                <b>Analyze PCB</b>
+                <b>Analyze Circuit</b>
                 <small>Run the AI review and inspect prioritized engineering findings.</small>
             </div>
         </div>
@@ -1150,7 +1150,7 @@ def main():
         uploaded_pdf = st.file_uploader(
             "📄 Drag & drop your schematic PDF",
             type=["pdf"],
-            help="Multi-page schematic PDFs are supported.",
+            help="Multi-page PDFs are supported.",
         )
 
         st.markdown(
@@ -1192,14 +1192,14 @@ def main():
     if uploaded_pdf:
 
         st.markdown(
-            '<div class="section-label">02 · Analyze PCB</div>',
+            '<div class="section-label">02 · Analyze Circuit</div>',
             unsafe_allow_html=True,
         )
 
         c1, c2, c3 = st.columns(3)
 
         with c1:
-            render_metric("✓", "Schematic ready")
+            render_metric("✓", "PCB/Schmatic design rendered")
 
         with c2:
             render_metric(
@@ -1239,13 +1239,13 @@ def main():
         # ---------------------------------------------------------------
 
         with st.status(
-            "Preparing schematic…",
+            "Preparing Design …",
             expanded=True,
         ) as status:
 
             try:
 
-                st.write("Rendering schematic pages.")
+                st.write("Rendering PDF pages.")
 
                 images = render_pdf_pages_to_images(
                     pdf_bytes,
@@ -1315,7 +1315,7 @@ def main():
         try:
 
             with st.status(
-                "🤖 Analyzing your Circuit…",
+                "🤖 Analyzing your circuit…",
                 expanded=True,
             ) as status:
 
@@ -1487,7 +1487,7 @@ def main():
             st.download_button(
                 "⬇️ Download PDF report",
                 data=report_pdf,
-                file_name="pcb_schematic_review.pdf",
+                file_name="Circuitmindai-v2 Fullreport.pdf",
                 mime="application/pdf",
                 width="stretch",
             )
@@ -1497,7 +1497,7 @@ def main():
             st.download_button(
                 "⬇️ Download Word report",
                 data=report_docx,
-                file_name="pcb_schematic_review.docx",
+                file_name="Circuitmindai-v2 Fullreport.docx",
                 mime=(
                     "application/vnd.openxmlformats-officedocument."
                     "wordprocessingml.document"
